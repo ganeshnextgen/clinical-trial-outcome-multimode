@@ -104,6 +104,7 @@ class ClinicalTrialsWebCollector:
                 # NEW columns:
                 "interventions_json": interventions_json,
                 # Optionally: a simplified, semicolon-joined set of intervention names for quick lookup
+                "interventions_type": ";".join(i.get("type", "") for i in interventions_list if i.get("type", ""),                
                 "interventions_names": ";".join(i.get("name", "") for i in interventions_list if i.get("name", ""))
             }
         except Exception as e:
