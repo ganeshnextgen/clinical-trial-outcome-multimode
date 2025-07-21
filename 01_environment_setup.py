@@ -11,7 +11,7 @@ from pathlib import Path
 # ✅ List of required Python packages
 REQUIRED_PACKAGES = [
     "pandas>=1.5.0",
-    "numpy>=1.24.0",
+    "numpy<2",
     "scikit-learn>=1.3.0",
     "imbalanced-learn>=0.11.0",
     "torch>=2.0.0",
