@@ -71,6 +71,32 @@ class ClinicalTrialsWebCollector:
             print(f"✅ Saved {len(df)} trials to {out_file}")
         else:
             print("⚠️ No trials retrieved from ClinicalTrials.gov")
+
+                df = pd.DataFrame(all_studies[:max_studies])
+        if not df.empty:
+            timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+            out_file = self.output_dir / f"raw_clinical_trials_{query_term or 'all'}_{timestamp}.csv"
+            df.to_csv(out_file, index=False)
+            print(f"✅ Saved {len(df)} trials to {out_file}")
+
+            # ✅ Extract and save unique drug/intervention names
+            if "interventions_names" in df.columns:
+                interventions_col = df["interventions_names"].fillna("")
+                intervention_names = set()
+                for row in interventions_col:
+                    for name in row.split(";"):
+                        clean_name = name.strip().lower()
+                        if clean_name:
+                            intervention_names.add(clean_name)
+
+                drugs_df = pd.DataFrame({"drug_name": sorted(intervention_names)})
+                drugs_df.to_csv("data/processed/unique_drugs.csv", index=False)
+                print(f"✅ Extracted and saved {len(drugs_df)} unique drugs to: data/processed/unique_drugs.csv")
+            else:
+                print("⚠️ Column 'interventions_names' not found in trials data.")
+
+        else:
+            print("⚠️ No trials retrieved from ClinicalTrials.gov")
         return df
 
     def _extract_fields(self, study):
