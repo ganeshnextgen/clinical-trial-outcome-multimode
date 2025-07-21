@@ -30,7 +30,21 @@ class ClinicalTrialPreprocessor:
         combined_df = pd.concat(all_dfs, ignore_index=True)
         print(f"✅ Loaded and combined {len(files)} files.")
         return combined_df
-
+    
+    def extract_drug_interventions(self, df, intervention_col="intervention_names"):
+        """
+        Extract, normalize, and aggregate all unique drug/intervention names.
+        """
+        interventions = []
+        for val in df[intervention_col].fillna(""):
+            # Split if multiple drugs: assume '|' separator or comma
+            for item in re.split(r"\||,", val):
+                item = item.strip().lower()
+                if item:
+                    interventions.append(item)
+        interventions = list(set(interventions))
+        print(f"Extracted {len(interventions)} unique interventions.")
+        return interventions
 
     def preprocess(self, df):
         print("🧹 Cleaning and encoding data...")
@@ -70,7 +84,23 @@ class ClinicalTrialPreprocessor:
             le = LabelEncoder()
             df[f"{col}_encoded"] = le.fit_transform(df[col].fillna("Unknown"))
             self.label_encoders[col] = le
-
+        
+        # 1. Extract interventions for downstream processing
+        if 'intervention_names' in df.columns:
+            df['intervention_names_clean'] = (
+                df['intervention_names'].fillna('').apply(lambda x: '|'.join(sorted(set(i.strip().lower() for i in re.split(r'\||,', x) if i.strip()))))
+            )
+        else:
+            df['intervention_names_clean'] = ""
+        
+        # Optionally save unique interventions list for downstream
+        intervention_set = set()
+        for s in df['intervention_names_clean']:
+            intervention_set.update([i.strip() for i in s.split('|') if i.strip()])
+        interventions_df = pd.DataFrame({'drug_name': sorted(intervention_set)})
+        interventions_df.to_csv(self.processed_dir / "unique_drugs.csv", index=False)
+        print("✅ Saved unique drug names for fingerprinting.")
+        
         # Save processed
         out_file = self.processed_dir / "clinical_trials_processed.csv"
         df.to_csv(out_file, index=False)
