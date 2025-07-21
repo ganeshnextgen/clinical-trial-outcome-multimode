@@ -8,6 +8,9 @@ import numpy as np
 import re
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from pathlib import Path
+import requests
+from rdkit import Chem
+from rdkit.Chem import AllChem
 
 class ClinicalTrialPreprocessor:
     def __init__(self, data_dir="data", processed_dir="data/processed"):
@@ -31,20 +34,7 @@ class ClinicalTrialPreprocessor:
         print(f"✅ Loaded and combined {len(files)} files.")
         return combined_df
     
-    def extract_drug_interventions(self, df, intervention_col="intervention_names"):
-        """
-        Extract, normalize, and aggregate all unique drug/intervention names.
-        """
-        interventions = []
-        for val in df[intervention_col].fillna(""):
-            # Split if multiple drugs: assume '|' separator or comma
-            for item in re.split(r"\||,", val):
-                item = item.strip().lower()
-                if item:
-                    interventions.append(item)
-        interventions = list(set(interventions))
-        print(f"Extracted {len(interventions)} unique interventions.")
-        return interventions
+    
 
     def preprocess(self, df):
         print("🧹 Cleaning and encoding data...")
@@ -85,10 +75,44 @@ class ClinicalTrialPreprocessor:
             df[f"{col}_encoded"] = le.fit_transform(df[col].fillna("Unknown"))
             self.label_encoders[col] = le
         
+        def extract_drug_interventions(self, df, intervention_col="interventions_names"):
+            """
+            Extract, normalize, and aggregate all unique drug/intervention names.
+            """
+            interventions = []
+            for val in df[intervention_col].fillna(""):
+                # Split if multiple drugs: assume '|' separator or comma
+                for item in re.split(r"\||,", val):
+                    item = item.strip().lower()
+                    if item:
+                        interventions.append(item)
+            interventions = list(set(interventions))
+            print(f"Extracted {len(interventions)} unique interventions.")
+            return interventions
+        def get_smiles_from_pubchem(drug_name):
+            """Fetch canonical SMILES for a given drug name from PubChem."""
+            url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{drug_name}/property/SMILES/JSON'
+            response = requests.get(url)
+            if response.ok:
+                try:
+                    data = response.json()
+                    return data['PropertyTable']['Properties'][0]['SMILES']
+                except (KeyError, IndexError):
+                    return None
+            return None
+        
+        def get_fingerprint_from_smiles(smiles):
+            """Generate RDKit Morgan fingerprint as a string for a SMILES."""
+            mol = Chem.MolFromSmiles(smiles)
+            if mol:
+                fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+                return fp.ToBitString()
+            return None
+            
         # 1. Extract interventions for downstream processing
-        if 'intervention_names' in df.columns:
+        if 'interventions_names' in df.columns:
             df['intervention_names_clean'] = (
-                df['intervention_names'].fillna('').apply(lambda x: '|'.join(sorted(set(i.strip().lower() for i in re.split(r'\||,', x) if i.strip()))))
+                df['interventions_names'].fillna('').apply(lambda x: '|'.join(sorted(set(i.strip().lower() for i in re.split(r'\||,', x) if i.strip()))))
             )
         else:
             df['intervention_names_clean'] = ""
@@ -97,9 +121,22 @@ class ClinicalTrialPreprocessor:
         intervention_set = set()
         for s in df['intervention_names_clean']:
             intervention_set.update([i.strip() for i in s.split('|') if i.strip()])
+
+        # Existing code to create unique drug list
         interventions_df = pd.DataFrame({'drug_name': sorted(intervention_set)})
-        interventions_df.to_csv(self.processed_dir / "unique_drugs.csv", index=False)
-        print("✅ Saved unique drug names for fingerprinting.")
+        
+        # Fetch SMILES and fingerprints
+        interventions_df['smiles'] = interventions_df['drug_name'].apply(get_smiles_from_pubchem)
+        interventions_df['fingerprint'] = interventions_df['smiles'].apply(
+            lambda s: get_fingerprint_from_smiles(s) if pd.notnull(s) else None
+        )
+        
+        # Optionally filter to drugs with fingerprints only
+        result_df = interventions_df[interventions_df['fingerprint'].notnull()]
+        
+        # Save the result
+        result_df.to_csv(self.processed_dir / "unique_drugs.csv", index=False)
+        print(f"✅ Saved {len(result_df)} drugs with SMILES and fingerprint for machine learning.")
         
         # Save processed
         out_file = self.processed_dir / "clinical_trials_processed.csv"
