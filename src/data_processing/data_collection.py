@@ -1,102 +1,57 @@
 #!/usr/bin/env python3
 """
-Step 02: Enhanced Web Data Collection from ClinicalTrials.gov API (v2)
-
-- Queries studies (structured metadata + interventions)
-- Extracts intervention names/types using armsInterventionsModule
-- Outputs raw trial data to CSV including drug/device names in structured format
+Step 02: Enhanced Web Data Collection from ClinicalTrials.gov
+(Including armsInterventionsModule/interventions for drug mapping)
 """
 
 import requests
 import pandas as pd
 from pathlib import Path
 import time
-import json
 from tqdm import tqdm
-
+import json
 
 class ClinicalTrialsWebCollector:
-    def __init__(self, output_dir="data/raw"):
+    def __init__(self, output_dir="data"):
         self.base_url = "https://clinicaltrials.gov/api/v2/studies"
-        self.rate_limit = 1.2  # seconds between requests (politeness delay)
+        self.rate_limit = 1.2  # seconds between requests
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def search_trials(self, query_term="", max_studies=500):
         all_studies, page_token, page_size = [], None, 1000
-        pbar = tqdm(total=max_studies, desc=f"🔍 Fetching '{query_term}' studies")
-
+        pbar = tqdm(total=max_studies, desc=f"Fetching {query_term}")
         while len(all_studies) < max_studies:
             try:
                 params = {
                     "format": "json",
                     "pageSize": min(page_size, max_studies - len(all_studies))
                 }
-                if query_term:
-                    params["query.cond"] = query_term
-                if page_token:
-                    params["pageToken"] = page_token
-
+                if query_term: params["query.cond"] = query_term
+                if page_token: params["pageToken"] = page_token
                 r = requests.get(self.base_url, params=params, timeout=30)
                 r.raise_for_status()
                 data = r.json()
-
-                studies = data.get("studies", [])
-                if not studies:
+                if 'studies' not in data or not data['studies']:
                     break
-
-                processed = [self._extract_fields(study) for study in studies]
-                processed = [p for p in processed if p]  # remove None
-
-                all_studies.extend(processed)
+                processed = [self._extract_fields(study) for study in data['studies']]
+                all_studies.extend(filter(None, processed))
                 pbar.update(len(processed))
-
-                page_token = data.get("nextPageToken")
-                if not page_token:
-                    break
-
+                page_token = data.get('nextPageToken')
+                if not page_token: break
                 time.sleep(self.rate_limit)
-
             except Exception as e:
-                print(f"⚠️ Error during API call: {e}")
+                print(f"⚠️ Error: {e}")
                 break
-
         pbar.close()
-
-            df = pd.DataFrame(all_studies[:max_studies])
-            if not df.empty:
-                timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-                out_file = self.output_dir / f"raw_clinical_trials_{query_term or 'all'}_{timestamp}.csv"
-                df.to_csv(out_file, index=False)
-                print(f"✅ Saved {len(df)} trials to {out_file}")
-            else:
-                print("⚠️ No trials retrieved from ClinicalTrials.gov")
-
-                    df = pd.DataFrame(all_studies[:max_studies])
-            if not df.empty:
-                timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
-                out_file = self.output_dir / f"raw_clinical_trials_{query_term or 'all'}_{timestamp}.csv"
-                df.to_csv(out_file, index=False)
-                print(f"✅ Saved {len(df)} trials to {out_file}")
-
-                # ✅ Extract and save unique drug/intervention names
-                if "interventions_names" in df.columns:
-                    interventions_col = df["interventions_names"].fillna("")
-                    intervention_names = set()
-                    for row in interventions_col:
-                        for name in row.split(";"):
-                            clean_name = name.strip().lower()
-                            if clean_name:
-                                intervention_names.add(clean_name)
-
-                    drugs_df = pd.DataFrame({"drug_name": sorted(intervention_names)})
-                    drugs_df.to_csv("data/processed/unique_drugs.csv", index=False)
-                    print(f"✅ Extracted and saved {len(drugs_df)} unique drugs to: data/processed/unique_drugs.csv")
-                else:
-                    print("⚠️ Column 'interventions_names' not found in trials data.")
-
-            else:
-                print("⚠️ No trials retrieved from ClinicalTrials.gov")
+        df = pd.DataFrame(all_studies[:max_studies])
+        if not df.empty:
+            timestamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+            out_file = self.output_dir / f"raw_clinical_trials_{timestamp}.csv"
+            df.to_csv(out_file, index=False)
+            print(f"✅ {len(df)} trials saved to {out_file}")
+        else:
+            print("❌ No studies collected")
         return df
 
     def _extract_fields(self, study):
@@ -109,10 +64,13 @@ class ClinicalTrialsWebCollector:
             design_info = design.get('designInfo', {})
             masking_info = design_info.get('maskingInfo', {})
             enrollment_info = design.get('enrollmentInfo', {})
-            arms_module = protocol.get('armsInterventionsModule', {})
 
+            # New: Get interventions from armsInterventionsModule
+            arms_module = protocol.get('armsInterventionsModule', {})
             interventions_list = []
-            for intervention in arms_module.get('interventions', []):
+            interventions = arms_module.get('interventions', [])
+            for intervention in interventions:
+                # Useful keys: intervention type/name, description, mesh/other IDs
                 interventions_list.append({
                     "name": intervention.get("name", ""),
                     "type": intervention.get("type", ""),
@@ -121,6 +79,7 @@ class ClinicalTrialsWebCollector:
                     "other_ids": intervention.get("otherIds", []),
                 })
 
+            # Store interventions as JSON string for safe table storage (or further parsing)
             interventions_json = json.dumps(interventions_list, ensure_ascii=False)
 
             return {
@@ -142,22 +101,19 @@ class ClinicalTrialsWebCollector:
                 "primary_purpose": design_info.get("primaryPurpose", ""),
                 "enrollment_count": enrollment_info.get("count", 0),
                 "enrollment_type": enrollment_info.get("type", ""),
+                # NEW columns:
                 "interventions_json": interventions_json,
-                "interventions_types": ";".join(i.get("type", "") for i in interventions_list if i.get("type", "")),
+                # Optionally: a simplified, semicolon-joined set of intervention names for quick lookup
+                "interventions_types": ";".join(i.get("type", "") for i in interventions_list if i.get("type", "")),                
                 "interventions_names": ";".join(i.get("name", "") for i in interventions_list if i.get("name", ""))
             }
-
         except Exception as e:
             print(f"❌ Extraction error: {e}")
             return None
 
-
 if __name__ == "__main__":
-    collector = ClinicalTrialsWebCollector(output_dir="data/raw")
-
-    # Run multiple queries: can adjust or remove as needed
-    collector.search_trials("cancer", max_studies=500)
-    collector.search_trials("diabetes", max_studies=500)
-    collector.search_trials("hypertension", max_studies=500)
-
-    print("🚀 ClinicalTrials.gov data collection complete.")
+    collector = ClinicalTrialsWebCollector("data")
+    _ = collector.search_trials("cancer", 500)
+    _ = collector.search_trials("diabetes", 500)
+    _ = collector.search_trials("hypertension", 500)
+    print("🚀 Data collection completed.")
