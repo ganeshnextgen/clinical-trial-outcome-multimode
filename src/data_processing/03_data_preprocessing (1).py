@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""
+Step 03: Data Preprocessing & Feature Engineering
+"""
+
+import pandas as pd
+import numpy as np
+import re
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from pathlib import Path
+import requests
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
+class ClinicalTrialPreprocessor:
+    def __init__(self, data_dir="data", processed_dir="data/processed"):
+        self.data_dir = Path(data_dir)
+        self.processed_dir = Path(processed_dir)
+        self.processed_dir.mkdir(parents=True, exist_ok=True)
+        self.label_encoders = {}
+
+    def load_raw_files(self):
+        files = sorted(self.data_dir.glob("raw_clinical_trials_*.csv"))
+        if not files:
+            raise FileNotFoundError("No raw files found.")
+        
+        all_dfs = []
+        for file in files:
+            print(f"📂 Loading: {file}")
+            df = pd.read_csv(file)
+            all_dfs.append(df)
+        
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+        print(f"✅ Loaded and combined {len(files)} files.")
+        return combined_df
+    
+    
+
+    def preprocess(self, df):
+        print("🧹 Cleaning and encoding data...")
+    
+        # Case-insensitive matching for outcome
+        succ = ['completed', 'active, not recruiting', 'recruiting', 'enrolling by invitation']
+        fail = ['terminated', 'withdrawn', 'suspended', 'no longer available', 'temporarily not available']
+    
+        def outcome(status, reason):
+            if pd.isna(status):
+                return np.nan
+            s = str(status).strip().lower()
+            if s in succ:
+                return 1
+            if s in fail:
+                return 0
+            if pd.notna(reason) and str(reason).strip() != "":
+                return 0
+            return np.nan
+    
+        df['outcome'] = df.apply(lambda r: outcome(r.get('overall_status'), r.get('why_stopped')), axis=1)
+        df = df.dropna(subset=['outcome']).copy()
+        
+        print(f"✅ Outcome labeling complete. Remaining trials: {len(df)}")
+
+        # Text cleaning and join
+        text_cols = ['brief_title', 'official_title', 'brief_summary', 'detailed_description']
+        def clean(x):
+            if pd.isnull(x): return ""
+            return re.sub(r"[^\w\s]", " ", str(x).lower())
+        df['combined_text'] = df[text_cols].fillna("").agg(' '.join, axis=1).apply(clean)
+        df['enrollment_count'] = pd.to_numeric(df['enrollment_count'], errors='coerce').fillna(0)
+
+        # Encode categoricals
+        cat_cols = ['study_type', 'phases', 'allocation', 'intervention_model', 'masking', 'primary_purpose']
+        for col in cat_cols:
+            le = LabelEncoder()
+            df[f"{col}_encoded"] = le.fit_transform(df[col].fillna("Unknown"))
+            self.label_encoders[col] = le
+        
+        def extract_drug_interventions(self, df, intervention_col="interventions_names"):
+            """
+            Extract, normalize, and aggregate all unique drug/intervention names.
+            """
+            interventions = []
+            for val in df[intervention_col].fillna(""):
+                # Split if multiple drugs: assume '|' separator or comma
+                for item in re.split(r"\||,", val):
+                    item = item.strip().lower()
+                    if item:
+                        interventions.append(item)
+            interventions = list(set(interventions))
+            print(f"Extracted {len(interventions)} unique interventions.")
+            return interventions
+        def get_smiles_from_pubchem(drug_name):
+            """Fetch canonical SMILES for a given drug name from PubChem."""
+            url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{drug_name}/property/SMILES/JSON'
+            response = requests.get(url)
+            if response.ok:
+                try:
+                    data = response.json()
+                    return data['PropertyTable']['Properties'][0]['SMILES']
+                except (KeyError, IndexError):
+                    return None
+            return None
+        
+        def get_fingerprint_from_smiles(smiles):
+            """Generate RDKit Morgan fingerprint as a string for a SMILES."""
+            mol = Chem.MolFromSmiles(smiles)
+            if mol:
+                fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+                return fp.ToBitString()
+            return None
+            
+        # 1. Extract interventions for downstream processing
+        if 'interventions_names' in df.columns:
+            df['intervention_names_clean'] = (
+                df['interventions_names'].fillna('').apply(lambda x: '|'.join(sorted(set(i.strip().lower() for i in re.split(r'\||,', x) if i.strip()))))
+            )
+        else:
+            df['intervention_names_clean'] = ""
+        
+        # Optionally save unique interventions list for downstream
+        intervention_set = set()
+        for s in df['intervention_names_clean']:
+            intervention_set.update([i.strip() for i in s.split('|') if i.strip()])
+
+        # Existing code to create unique drug list
+        interventions_df = pd.DataFrame({'drug_name': sorted(intervention_set)})
+        
+        # Fetch SMILES and fingerprints
+        interventions_df['smiles'] = interventions_df['drug_name'].apply(get_smiles_from_pubchem)
+        interventions_df['fingerprint'] = interventions_df['smiles'].apply(
+            lambda s: get_fingerprint_from_smiles(s) if pd.notnull(s) else None
+        )
+        
+        # Optionally filter to drugs with fingerprints only
+        result_df = interventions_df[interventions_df['fingerprint'].notnull()]
+        
+        # Save the result
+        result_df.to_csv(self.processed_dir / "unique_drugs.csv", index=False)
+        print(f"✅ Saved {len(result_df)} drugs with SMILES and fingerprint for machine learning.")
+        
+        # Save processed
+        out_file = self.processed_dir / "clinical_trials_processed.csv"
+        df.to_csv(out_file, index=False)
+        print(f"✅ Saved processed data: {out_file}")
+        return df
+
+if __name__ == "__main__":
+    processor = ClinicalTrialPreprocessor()
+    raw = processor.load_raw_files()
+    _ = processor.preprocess(raw)
+    print("🚀 Preprocessing completed.")
