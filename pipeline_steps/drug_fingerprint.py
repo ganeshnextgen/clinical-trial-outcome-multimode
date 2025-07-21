@@ -1,77 +1,41 @@
-#!/usr/bin/env python3
-"""
-Drug Fingerprint Generator for Clinical Trials (supports integration with pipeline)
-"""
+# drug_fingerprint.py
 
 import pandas as pd
-import numpy as np
+import requests
 from rdkit import Chem
-from rdkit.Chem import AllChem, MACCSkeys
+from rdkit.Chem import AllChem
+from pathlib import Path
 
-class DrugFingerprintGenerator:
-    def __init__(self, smiles_lookup_dict=None, fp_type="morgan", fp_size=2048, radius=2):
-        """
-        smiles_lookup_dict: dict mapping lowercase drug names to SMILES strings.
-        fp_type: "morgan" (ECFP-like) or "maccs"
-        fp_size: size for Morgan/ECFP fingerprints
-        radius: radius for Morgan fingerprints
-        """
-        self.smiles_lookup = smiles_lookup_dict or {}
-        self.fp_type = fp_type
-        self.fp_size = fp_size
-        self.radius = radius
-
-    def fetch_smiles(self, drug_name):
-        """
-        Lookup or fetch SMILES. For deployment, use external API (e.g., PubChem) if not found.
-        """
-        return self.smiles_lookup.get(drug_name.lower(), "")
-
-    def compute_fingerprint(self, smiles):
-        """
-        Returns a numpy binary vector for the fingerprint or None if invalid.
-        """
-        mol = Chem.MolFromSmiles(smiles)
-        if not mol:
+def get_smiles_from_pubchem(drug_name):
+    """Fetch canonical SMILES for a given drug name from PubChem."""
+    url = f'https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{drug_name}/property/SMILES/JSON'
+    response = requests.get(url)
+    if response.ok:
+        try:
+            data = response.json()
+            return data['PropertyTable']['Properties'][0]['SMILES']
+        except (KeyError, IndexError):
             return None
-        if self.fp_type == "morgan":
-            fp = AllChem.GetMorganFingerprintAsBitVect(mol, self.radius, nBits=self.fp_size)
-        elif self.fp_type == "maccs":
-            fp = MACCSkeys.GenMACCSKeys(mol)
-            return np.array(list(fp.ToBitString()[1:]), dtype=np.int8)  # skip first empty bit
-        else:
-            raise ValueError("Unsupported fingerprint type")
-        arr = np.zeros((1,), dtype=np.int8)
-        DataStructs.ConvertToNumpyArray(fp, arr)
-        return arr
+    return None
 
-    def process_drug_list(self, drug_df):
-        """
-        Takes a DataFrame with 'drug_name' and optional 'smiles' columns.
-        Returns drug_name, SMILES, and fingerprint features.
-        """
-        records = []
-        for ix, row in drug_df.iterrows():
-            drug = row['drug_name']
-            smiles = row.get('smiles', '') or self.fetch_smiles(drug)
-            if not smiles:
-                continue
-            fp = self.compute_fingerprint(smiles)
-            if fp is not None:
-                rec = {'drug_name': drug, 'smiles': smiles}
-                for i, v in enumerate(fp):
-                    rec[f"fp_{i}"] = v
-                records.append(rec)
-        return pd.DataFrame(records)
+def get_fingerprint_from_smiles(smiles):
+    """Generate RDKit Morgan fingerprint as a string for a SMILES."""
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+        return fp.ToBitString()
+    return None
+
+def main(drugs_file="data/processed/unique_drugs.csv", output_file="data/processed/unique_drugs_with_fingerprint.csv"):
+    drugs_df = pd.read_csv(drugs_file)
+    drugs_df['smiles'] = drugs_df['drug_name'].apply(get_smiles_from_pubchem)
+    drugs_df['fingerprint'] = drugs_df['smiles'].apply(
+        lambda s: get_fingerprint_from_smiles(s) if pd.notnull(s) else None
+    )
+    # Optionally keep only those with a fingerprint
+    drugs_df = drugs_df[drugs_df['fingerprint'].notnull()]
+    drugs_df.to_csv(output_file, index=False)
+    print(f"✅ Saved {len(drugs_df)} drugs with SMILES and fingerprint.")
 
 if __name__ == "__main__":
-    # Example: Load drug names from preprocessing output
-    drug_df = pd.read_csv("data/processed/unique_drugs.csv")
-    # If you have {drug_name: smiles} mapping, supply it here
-    # For demo, let's fill all SMILES as blank (user should update)
-    drug_df['smiles'] = ""  # Fill with your own SMILES mapping if available
-
-    gen = DrugFingerprintGenerator(fp_type="morgan", fp_size=1024)
-    fp_df = gen.process_drug_list(drug_df)
-    fp_df.to_csv("data/processed/drug_fingerprints.csv", index=False)
-    print(f"✅ Generated and saved {len(fp_df)} drug fingerprints.")
+    main()
